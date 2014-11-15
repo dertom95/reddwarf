@@ -138,7 +138,7 @@ import javax.management.JMException;
  * 
  * </dl>
  */
-class Kernel {
+public class Kernel {
 
     // logger for this class
     private static final LoggerWrapper logger =

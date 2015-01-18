@@ -23,6 +23,7 @@ package com.sun.sgs.impl.protocol.simple;
 
 import java.io.EOFException;
 import java.io.IOException;
+import java.net.InetSocketAddress;
 import java.nio.BufferOverflowException;
 import java.nio.ByteBuffer;
 import java.nio.channels.Channel;
@@ -31,7 +32,17 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
+import org.java_websocket.WebSocket;
+import org.java_websocket.WebSocketAdapter;
 import org.java_websocket.WebSocketImpl;
+import org.java_websocket.WebSocketListener;
+import org.java_websocket.drafts.Draft;
+import org.java_websocket.exceptions.InvalidDataException;
+import org.java_websocket.framing.Framedata;
+import org.java_websocket.handshake.ClientHandshake;
+import org.java_websocket.handshake.Handshakedata;
+import org.java_websocket.handshake.ServerHandshake;
+import org.java_websocket.handshake.ServerHandshakeBuilder;
 
 import com.sun.sgs.impl.nio.DelegatingCompletionHandler;
 import com.sun.sgs.impl.protocol.simple.AsynchronousMessageChannel.WebsocketContext.WebsocketReader;
@@ -164,17 +175,27 @@ public class AsynchronousMessageChannel implements Channel {
 	    ? (readBuffer.getShort(0) & 0xffff) + PREFIX_LENGTH : -1;
     }
 
-    final class WebsocketContext
+    final class WebsocketContext extends WebSocketAdapter
     {
+    	private boolean firstRead = true;
+    	private boolean isWebsocket = false;
+    	private boolean connected = false;
+
+    	// magic number to find websockets
+    	public static final int WEBSOCKET_LENGTH = 1195725856;
+
+    	
     	private WebSocketImpl websocket;
     	final AsynchronousByteChannel channel;
 
-    	private ByteBuffer wsReadbuffer;
+    	private ByteBuffer wsInputBuffer;
+    	private ByteBuffer wsOutputBuffer;
     	
     	public WebsocketContext(AsynchronousByteChannel channel,ByteBuffer readbuffer)
     	{
     		this.channel = channel;
-    		this.wsReadbuffer = readbuffer;
+    		this.wsOutputBuffer = readbuffer;
+    		this.wsInputBuffer = ByteBuffer.allocate(4096);
     	}
 
 		public boolean isOpen() {
@@ -201,6 +222,7 @@ public class AsynchronousMessageChannel implements Channel {
         extends DelegatingCompletionHandler<Integer, Void, Integer, Void>
         {
         	private final ByteBuffer writeBuffer;
+        	private int wroteBytes = 0;
         	
         	private WebsocketWriter(ByteBuffer writeBuffer,CompletionHandler<Integer, Void> handler) {
         		super(null, handler);
@@ -211,18 +233,45 @@ public class AsynchronousMessageChannel implements Channel {
         	
     		@Override
     		protected IoFuture<Integer, Void> implStart() {
-    			System.out.println("MyStart");
-    			return channel.write( writeBuffer, this);
+    			if (isWebsocket)
+    			{
+    				websocket.send(writeBuffer);
+    				
+    				if (!websocket.outQueue.isEmpty())
+    				{
+    					ByteBuffer outData = websocket.outQueue.poll();
+    					return channel.write(outData,this);
+    				} else {
+    					throw new RuntimeException("no websocket-frames to send!?");
+    				}
+    				
+    			}
+    			else
+    			{
+    				return channel.write( writeBuffer, this);
+    			}
     		}
     		
     		@Override
     		protected IoFuture<Integer, Void> implCompleted(
     				IoFuture<Integer, Void> innerResult) throws Exception {
     			// TODO Auto-generated method stub
-    			int byteWrote = innerResult.getNow();
-    			System.out.println("MyComplete wrote:"+byteWrote);
-    			set(byteWrote);
+    			
+    			wroteBytes  += innerResult.getNow();
+
+    			if (isWebsocket)
+    			{
+    				if (!websocket.outQueue.isEmpty())
+    				{
+    					ByteBuffer outData = websocket.outQueue.poll();
+    					return channel.write(outData,this);
+    				} 
+    			}
+    			
+    			System.out.println("MyComplete wrote:"+wroteBytes);
+    			set(wroteBytes);
     			return null;
+
     		}    		
         }
 
@@ -233,26 +282,187 @@ public class AsynchronousMessageChannel implements Channel {
         		super(null, handler);
             }
         	
+        	private final void wsDecode()
+        	{
+        		ByteBuffer decodeBuffer = wsInputBuffer.duplicate();
+        		decodeBuffer.flip();
+
+        		websocket.decode(decodeBuffer);
+				
+        		if (decodeBuffer.position() == wsInputBuffer.position()) {
+        			wsInputBuffer.clear();
+        		} 
+        		else if (decodeBuffer.position() < wsInputBuffer.position()){
+        			wsInputBuffer = decodeBuffer.compact();
+        		}
+        		else {
+        			throw new RuntimeException("Websocket-Decoder read more bytes than available!?!??");
+        		}
+        	}
+        	
     		@Override
     		protected IoFuture<Integer, Void> implStart() {
     			System.out.println("MyStart");
-    			return channel.read(readBuffer, this);
+    			if (isWebsocket || firstRead) // in websocket-mode use a inputbuffer
+    			{
+        			wsInputBuffer.clear();
+        			return channel.read(wsInputBuffer, this);
+    			}
+    			else // if not using websocket just write in the outbutbuffer, since there is no further processing needed
+    			{
+    				return channel.read(wsOutputBuffer, this);
+    			}
     		}
     		
     		@Override
     		protected IoFuture<Integer, Void> implCompleted(
     				IoFuture<Integer, Void> innerResult) throws Exception {
-    			// TODO Auto-generated method stub
-    			int read = innerResult.getNow();
-    			if (read==0)
+
+    			int readBytes = innerResult.getNow();
+    			if (readBytes < 0)
     			{
-    				int a=0;
+    				set(readBytes);
+    				return null;
     			}
-    			System.out.println("MyComplete read:"+read);
-    			set(read);
-    			return null;
+    			
+    			// check for websocket by checking if the first two chars are "GE"(T HTTP...)
+    			if (firstRead)
+    			{
+    				if(readBytes < 2) {
+    					// load more
+    					return channel.read(wsInputBuffer, this);
+    				}
+    				
+					firstRead = false;
+
+					if (wsInputBuffer.getInt(0) == WEBSOCKET_LENGTH) {
+    					isWebsocket = true;
+    					websocket = new WebSocketImpl(WebsocketContext.this, WebSocketImpl.defaultdraftlist);
+    				}
+    			}
+    			
+    			if (isWebsocket)
+    			{
+					// read handshake and create response
+					wsDecode();
+					
+    				if (websocket.hasBufferedData())
+    				{
+    					if (!connected)
+    					{
+    						ByteBuffer handshakeResponse = websocket.outQueue.poll();
+        					channel.write(handshakeResponse, null);
+        					connected = true;
+        					if (!websocket.hasBufferedData())
+        					{
+        						// start grabbing data
+        						return channel.read(wsInputBuffer,this);
+        					}
+    					}
+    					
+    					int outBytes = 0;
+    					while (websocket.hasBufferedData())
+    					{
+        					ByteBuffer outputData = websocket.outQueue.poll();
+        					outBytes += outputData.remaining();
+        					// write the data to the outputBuffer
+        					wsOutputBuffer.put(outputData);
+    					}
+    					if (outBytes > 0) {
+    						set(outBytes);
+    						// passed data to outer completionhandler 
+    						return null;
+    					} else {
+    						channel.read(wsOutputBuffer, this);
+    					}
+    				}
+    
+    				
+					
+    			}
+    			else // no websocket, just bypass the data
+    			{
+    				if (readBytes > 0)
+    				{
+        				if (!connected) // first time here
+        				{
+        					connected = true;
+        					wsInputBuffer.flip();
+        					wsOutputBuffer.put(wsInputBuffer);
+        				}
+        				// otherwise we read directly in the outputBuffer
+        				set(readBytes);
+        				return null;
+    				}
+    				else
+    				{
+    					return channel.read(wsOutputBuffer, this);
+    				}
+    			}
+    			return channel.read(wsOutputBuffer, this);
     		}        	
         }
+
+		@Override
+		public void onWebsocketMessage(WebSocket conn, String message) {
+			System.out.println("WS: OnStrMessage: "+message);
+		}
+
+		@Override
+		public void onWebsocketMessage(WebSocket conn, ByteBuffer blob) {
+			System.out.println("WS: OnWebMessage "+blob.limit());
+		}
+
+		@Override
+		public void onWebsocketOpen(WebSocket conn, Handshakedata d) {
+			System.out.println("WS: Open!");
+		}
+
+		@Override
+		public void onWebsocketClose(WebSocket ws, int code, String reason,
+				boolean remote) {
+			System.out.println("WS: Close!");
+		}
+
+		@Override
+		public void onWebsocketClosing(WebSocket ws, int code, String reason,
+				boolean remote) {
+			System.out.println("WS: Closing!");
+			
+		}
+
+		@Override
+		public void onWebsocketCloseInitiated(WebSocket ws, int code,
+				String reason) {
+			System.out.println("WS: Close init!");
+		}
+
+		@Override
+		public void onWebsocketError(WebSocket conn, Exception ex) {
+			System.out.println("Error:"+ex);
+			
+		}
+
+		@Override
+		public void onWriteDemand(WebSocket conn) {
+			// TODO Auto-generated method stub
+			System.out.println("WriteDemand");
+			
+		}
+
+		@Override
+		public InetSocketAddress getLocalSocketAddress(WebSocket conn) {
+			// TODO Auto-generated method stub
+			return null;
+		}
+
+		@Override
+		public InetSocketAddress getRemoteSocketAddress(WebSocket conn) {
+			// TODO Auto-generated method stub
+			return null;
+		}
+
+
     }
 
     

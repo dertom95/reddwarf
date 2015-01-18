@@ -21,13 +21,6 @@
 
 package com.sun.sgs.impl.protocol.simple;
 
-import com.sun.sgs.impl.nio.DelegatingCompletionHandler;
-import com.sun.sgs.impl.sharedutil.LoggerWrapper;
-import com.sun.sgs.nio.channels.AsynchronousByteChannel;
-import com.sun.sgs.nio.channels.CompletionHandler;
-import com.sun.sgs.nio.channels.IoFuture;
-import com.sun.sgs.nio.channels.ReadPendingException;
-import com.sun.sgs.nio.channels.WritePendingException;
 import java.io.EOFException;
 import java.io.IOException;
 import java.nio.BufferOverflowException;
@@ -37,6 +30,17 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+
+import org.java_websocket.WebSocketImpl;
+
+import com.sun.sgs.impl.nio.DelegatingCompletionHandler;
+import com.sun.sgs.impl.protocol.simple.AsynchronousMessageChannel.WebsocketContext.WebsocketReader;
+import com.sun.sgs.impl.sharedutil.LoggerWrapper;
+import com.sun.sgs.nio.channels.AsynchronousByteChannel;
+import com.sun.sgs.nio.channels.CompletionHandler;
+import com.sun.sgs.nio.channels.IoFuture;
+import com.sun.sgs.nio.channels.ReadPendingException;
+import com.sun.sgs.nio.channels.WritePendingException;
 
 /**
  * A wrapper channel that reads and writes complete messages by framing
@@ -52,11 +56,8 @@ public class AsynchronousMessageChannel implements Channel {
     static final LoggerWrapper logger = new LoggerWrapper(
 	Logger.getLogger(AsynchronousMessageChannel.class.getName()));
 
-    /**
-     * The underlying channel (possibly another layer of abstraction,
-     * e.g. compression, retransmission...)
-     */
-    final AsynchronousByteChannel channel;
+    
+    final WebsocketContext websocketCtx;
 
     /** Whether there is a read underway. */
     final AtomicBoolean readPending = new AtomicBoolean();
@@ -84,8 +85,8 @@ public class AsynchronousMessageChannel implements Channel {
 		"The readBufferSize must not be smaller than " +
 		PREFIX_LENGTH);
 	}
-	this.channel = channel;
 	readBuffer = ByteBuffer.allocateDirect(readBufferSize);
+	this.websocketCtx = new WebsocketContext(channel, readBuffer);
     }
 
     /* -- Methods for reading and writing -- */
@@ -139,13 +140,14 @@ public class AsynchronousMessageChannel implements Channel {
     /** {@inheritDoc} */
     @Override
     public void close() throws IOException {
-        channel.close();
+    	websocketCtx.close();
+
     }
 
     /** {@inheritDoc} */
     @Override
     public boolean isOpen() {
-        return channel.isOpen();
+        return websocketCtx.isOpen();
     }
 
     /* -- Other methods and classes -- */
@@ -162,6 +164,98 @@ public class AsynchronousMessageChannel implements Channel {
 	    ? (readBuffer.getShort(0) & 0xffff) + PREFIX_LENGTH : -1;
     }
 
+    final class WebsocketContext
+    {
+    	private WebSocketImpl websocket;
+    	final AsynchronousByteChannel channel;
+
+    	private ByteBuffer wsReadbuffer;
+    	
+    	public WebsocketContext(AsynchronousByteChannel channel,ByteBuffer readbuffer)
+    	{
+    		this.channel = channel;
+    		this.wsReadbuffer = readbuffer;
+    	}
+
+		public boolean isOpen() {
+			return  channel.isOpen();
+		}
+
+		public void close() throws IOException {
+	    	channel.close();
+		}
+
+		IoFuture<Integer,Void> read(CompletionHandler<Integer, Void> handler)
+		{
+			return new WebsocketReader(handler).start();
+		}
+		
+		IoFuture<Integer,Void> write(ByteBuffer bb,CompletionHandler<Integer, Void> handler)
+		{
+			return new WebsocketWriter(bb,handler).start();
+		}
+		
+		
+		
+        final public class WebsocketWriter
+        extends DelegatingCompletionHandler<Integer, Void, Integer, Void>
+        {
+        	private final ByteBuffer writeBuffer;
+        	
+        	private WebsocketWriter(ByteBuffer writeBuffer,CompletionHandler<Integer, Void> handler) {
+        		super(null, handler);
+        		this.writeBuffer = writeBuffer;
+            }
+        	
+        	
+        	
+    		@Override
+    		protected IoFuture<Integer, Void> implStart() {
+    			System.out.println("MyStart");
+    			return channel.write( writeBuffer, this);
+    		}
+    		
+    		@Override
+    		protected IoFuture<Integer, Void> implCompleted(
+    				IoFuture<Integer, Void> innerResult) throws Exception {
+    			// TODO Auto-generated method stub
+    			int byteWrote = innerResult.getNow();
+    			System.out.println("MyComplete wrote:"+byteWrote);
+    			set(byteWrote);
+    			return null;
+    		}    		
+        }
+
+        final public class WebsocketReader
+        extends DelegatingCompletionHandler<Integer, Void, Integer, Void>
+        {
+        	private WebsocketReader(CompletionHandler<Integer, Void> handler) {
+        		super(null, handler);
+            }
+        	
+    		@Override
+    		protected IoFuture<Integer, Void> implStart() {
+    			System.out.println("MyStart");
+    			return channel.read(readBuffer, this);
+    		}
+    		
+    		@Override
+    		protected IoFuture<Integer, Void> implCompleted(
+    				IoFuture<Integer, Void> innerResult) throws Exception {
+    			// TODO Auto-generated method stub
+    			int read = innerResult.getNow();
+    			if (read==0)
+    			{
+    				int a=0;
+    			}
+    			System.out.println("MyComplete read:"+read);
+    			set(read);
+    			return null;
+    		}        	
+        }
+    }
+
+    
     /**
      * Implement a completion handler for reading a complete message from the
      * underlying byte stream.
@@ -230,28 +324,29 @@ public class AsynchronousMessageChannel implements Channel {
                     }
                 }
             }
-            if (messageLen >= 0 && readBuffer.position() >= messageLen) {
-                if (logger.isLoggable(Level.FINER)) {
-                    logger.log(Level.FINER, "{0} read complete {1}:{2}",
-			       this, messageLen, readBuffer.position());
-                }
-		/*
-		 * Return a read-only buffer containing just the message bytes
-		 * without the length prefix.
-		 */
-		ByteBuffer result = readBuffer.duplicate();
-		result.limit(messageLen);
-		result.position(PREFIX_LENGTH);
-                set(result.slice().asReadOnlyBuffer());
-                return null;
-            } else {
-		if (logger.isLoggable(Level.FINER)) {
-		    logger.log(Level.FINER, "{0} read incomplete {1}:{2}",
-			       this, messageLen, readBuffer.position());
+			if (messageLen >= 0 && readBuffer.position() >= messageLen) {
+				if (logger.isLoggable(Level.FINER)) {
+					logger.log(Level.FINER, "{0} read complete {1}:{2}", this,
+							messageLen, readBuffer.position());
+				}
+				/*
+				 * Return a read-only buffer containing just the message bytes
+				 * without the length prefix.
+				 */
+				ByteBuffer result = readBuffer.duplicate();
+				result.limit(messageLen);
+				result.position(PREFIX_LENGTH);
+				set(result.slice().asReadOnlyBuffer());
+				return null;
+			} else {
+				if (logger.isLoggable(Level.FINER)) {
+					logger.log(Level.FINER, "{0} read incomplete {1}:{2}",
+							this, messageLen, readBuffer.position());
+				}
+//				return channel.read(readBuffer, this);
+				return websocketCtx.read(this);
+			}
 		}
-		return channel.read(readBuffer, this);
-	    }
-        }
     }
 
     /**
@@ -296,7 +391,7 @@ public class AsynchronousMessageChannel implements Channel {
 	/** Start writing from the buffer. */
         @Override
         protected IoFuture<Integer, Void> implStart() {
-            return channel.write(srcWithSize, this);
+            return websocketCtx.write(srcWithSize,this);
         }
 
 	/** Process the results of writing so far and write more if needed. */
@@ -309,7 +404,7 @@ public class AsynchronousMessageChannel implements Channel {
 	    result.getNow();
             if (srcWithSize.hasRemaining()) {
                 /* Write some more */
-                return channel.write(srcWithSize, this);
+                return websocketCtx.write(srcWithSize, this);
             } else {
                 /* Finished */
                 return null;

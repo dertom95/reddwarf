@@ -27,6 +27,7 @@ import java.net.InetSocketAddress;
 import java.nio.BufferOverflowException;
 import java.nio.ByteBuffer;
 import java.nio.channels.Channel;
+import java.util.LinkedList;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Level;
@@ -35,17 +36,9 @@ import java.util.logging.Logger;
 import org.java_websocket.WebSocket;
 import org.java_websocket.WebSocketAdapter;
 import org.java_websocket.WebSocketImpl;
-import org.java_websocket.WebSocketListener;
-import org.java_websocket.drafts.Draft;
-import org.java_websocket.exceptions.InvalidDataException;
-import org.java_websocket.framing.Framedata;
-import org.java_websocket.handshake.ClientHandshake;
 import org.java_websocket.handshake.Handshakedata;
-import org.java_websocket.handshake.ServerHandshake;
-import org.java_websocket.handshake.ServerHandshakeBuilder;
 
 import com.sun.sgs.impl.nio.DelegatingCompletionHandler;
-import com.sun.sgs.impl.protocol.simple.AsynchronousMessageChannel.WebsocketContext.WebsocketReader;
 import com.sun.sgs.impl.sharedutil.LoggerWrapper;
 import com.sun.sgs.nio.channels.AsynchronousByteChannel;
 import com.sun.sgs.nio.channels.CompletionHandler;
@@ -191,6 +184,8 @@ public class AsynchronousMessageChannel implements Channel {
     	private ByteBuffer wsInputBuffer;
     	private ByteBuffer wsOutputBuffer;
     	
+    	private LinkedList<ByteBuffer> incoming = new LinkedList<ByteBuffer>();
+    	
     	public WebsocketContext(AsynchronousByteChannel channel,ByteBuffer readbuffer)
     	{
     		this.channel = channel;
@@ -233,6 +228,7 @@ public class AsynchronousMessageChannel implements Channel {
         	
     		@Override
     		protected IoFuture<Integer, Void> implStart() {
+    			System.out.println("WS: Write Start");
     			if (isWebsocket)
     			{
     				websocket.send(writeBuffer);
@@ -256,7 +252,7 @@ public class AsynchronousMessageChannel implements Channel {
     		protected IoFuture<Integer, Void> implCompleted(
     				IoFuture<Integer, Void> innerResult) throws Exception {
     			// TODO Auto-generated method stub
-    			
+
     			wroteBytes  += innerResult.getNow();
 
     			if (isWebsocket)
@@ -268,7 +264,7 @@ public class AsynchronousMessageChannel implements Channel {
     				} 
     			}
     			
-    			System.out.println("MyComplete wrote:"+wroteBytes);
+    			System.out.println("WS: write complete:"+wroteBytes);
     			set(wroteBytes);
     			return null;
 
@@ -284,6 +280,8 @@ public class AsynchronousMessageChannel implements Channel {
         	
         	private final void wsDecode()
         	{
+
+        		
         		ByteBuffer decodeBuffer = wsInputBuffer.duplicate();
         		decodeBuffer.flip();
 
@@ -302,7 +300,8 @@ public class AsynchronousMessageChannel implements Channel {
         	
     		@Override
     		protected IoFuture<Integer, Void> implStart() {
-    			System.out.println("MyStart");
+        		System.out.println("WS: READ START");
+
     			if (isWebsocket || firstRead) // in websocket-mode use a inputbuffer
     			{
         			wsInputBuffer.clear();
@@ -317,9 +316,11 @@ public class AsynchronousMessageChannel implements Channel {
     		@Override
     		protected IoFuture<Integer, Void> implCompleted(
     				IoFuture<Integer, Void> innerResult) throws Exception {
-
     			int readBytes = innerResult.getNow();
-    			if (readBytes < 0)
+        		
+    			System.out.println("WS: READ COMPLETED "+readBytes);
+
+        		if (readBytes < 0)
     			{
     				set(readBytes);
     				return null;
@@ -346,36 +347,37 @@ public class AsynchronousMessageChannel implements Channel {
 					// read handshake and create response
 					wsDecode();
 					
-    				if (websocket.hasBufferedData())
+    				if (!connected && !websocket.outQueue.isEmpty())
     				{
-    					if (!connected)
-    					{
     						ByteBuffer handshakeResponse = websocket.outQueue.poll();
-        					channel.write(handshakeResponse, null);
         					connected = true;
-        					if (!websocket.hasBufferedData())
-        					{
-        						// start grabbing data
-        						return channel.read(wsInputBuffer,this);
-        					}
-    					}
-    					
-    					int outBytes = 0;
-    					while (websocket.hasBufferedData())
-    					{
-        					ByteBuffer outputData = websocket.outQueue.poll();
-        					outBytes += outputData.remaining();
-        					// write the data to the outputBuffer
-        					wsOutputBuffer.put(outputData);
-    					}
-    					if (outBytes > 0) {
-    						set(outBytes);
-    						// passed data to outer completionhandler 
-    						return null;
-    					} else {
-    						channel.read(wsOutputBuffer, this);
-    					}
+        					return channel.write(handshakeResponse, new CompletionHandler<Integer, Void>() {
+								@Override
+								public void completed(
+										IoFuture<Integer, Void> result) {
+									channel.read(wsInputBuffer,WebsocketReader.this);	
+								}
+							});
+
     				}
+    				
+    					
+					int outBytes = 0;
+					while (!incoming.isEmpty())
+					{
+    					ByteBuffer outputData = incoming.pollFirst();
+    					outBytes += outputData.remaining();
+    					// write the data to the outputBuffer
+    					wsOutputBuffer.put(outputData);
+					}
+					if (outBytes > 0) {
+						set(outBytes);
+						// passed data to outer completionhandler 
+						return null;
+					} else {
+						return channel.read(wsOutputBuffer, this);
+					}
+    				
     
     				
 					
@@ -399,7 +401,7 @@ public class AsynchronousMessageChannel implements Channel {
     					return channel.read(wsOutputBuffer, this);
     				}
     			}
-    			return channel.read(wsOutputBuffer, this);
+    			
     		}        	
         }
 
@@ -410,6 +412,7 @@ public class AsynchronousMessageChannel implements Channel {
 
 		@Override
 		public void onWebsocketMessage(WebSocket conn, ByteBuffer blob) {
+			incoming.add(blob);
 			System.out.println("WS: OnWebMessage "+blob.limit());
 		}
 

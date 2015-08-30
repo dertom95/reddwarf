@@ -90,7 +90,8 @@ final class SerialUtil {
 	ObjectInputStream in = null;
 	try {
 	    in = new CustomClassDescriptorObjectInputStream(
-		new CompressByteArrayInputStream(data), classSerial);
+//   		new CompressByteArrayInputStream(data), classSerial);
+	    	new ByteArrayInputStream(data), classSerial);
 	    return in.readObject();
 	} catch (ClassNotFoundException e) {
 	    throw new ObjectIOException(
@@ -179,7 +180,8 @@ final class SerialUtil {
     {
 	ObjectOutputStream out = null;
 	try {
-	    ByteArrayOutputStream baos = new CompressByteArrayOutputStream();
+//	    ByteArrayOutputStream baos = new CompressByteArrayOutputStream();
+	    ByteArrayOutputStream baos = new ByteArrayOutputStream();
 	    out = new CheckReferencesObjectOutputStream(
 		baos, object, classSerial);
 	    out.writeObject(object);

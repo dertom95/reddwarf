@@ -712,7 +712,8 @@ public class Kernel {
                                       StartupKernelContext startupContext)
         throws Exception
     {
-        if (externalServices.size() != externalManagers.size() ||
+        if (
+//        		externalServices.size() != externalManagers.size() ||
             externalServices.size() != externalNodeTypes.size()) {
             if (logger.isLoggable(Level.SEVERE)) {
                 logger.log(Level.SEVERE, "External service count " +
@@ -732,7 +733,7 @@ public class Kernel {
                 continue;
             }
 
-            if (!externalManagers.get(i).equals("")) {
+            if (i < externalManagers.size() && !externalManagers.get(i).equals("")) {
                 setupService(externalServices.get(i), externalManagers.get(i),
                              startupContext);
             } else {
@@ -801,6 +802,7 @@ public class Kernel {
         Constructor<?> serviceConstructor;
         try {
             // find the appropriate constructor
+
             serviceConstructor =
                     serviceClass.getConstructor(Properties.class,
                     ComponentRegistry.class, TransactionProxy.class);
@@ -810,6 +812,14 @@ public class Kernel {
         } catch (NoSuchMethodException e) {
             // instead, look for a constructor with 4 parameters which is for 
             // services with shutdown privileges.
+        	for (Constructor c : serviceClass.getConstructors()) {
+        		Class[] types = c.getParameterTypes();
+        		for (Class cl : types) {
+        			System.out.println("Type:"+cl.getName());
+        			logger.log(Level.SEVERE, "Type:"+cl.getName());
+        		}
+        	}
+        	
             serviceConstructor =
                     serviceClass.getConstructor(Properties.class,
                     ComponentRegistry.class, TransactionProxy.class,

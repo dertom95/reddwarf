@@ -1,0 +1,7 @@
+create Service:
+- extends AbstractService
+- PUBLIC constructor needed
+- To access the AppContext you have to be inside a task called by TransactionScheduler using some identity:
+  1)IdentityImpl owner = new SystemIdentity("app:" + appName);
+  2)transactionScheduler.runTask(new KernelRunnable() {...})
+  

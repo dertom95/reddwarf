@@ -4,19 +4,29 @@ import java.io.IOException;
 import java.net.PasswordAuthentication;
 import java.nio.ByteBuffer;
 import java.util.Properties;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 import com.sun.sgs.client.ClientChannel;
 import com.sun.sgs.client.ClientChannelListener;
 import com.sun.sgs.client.simple.SimpleClient;
 import com.sun.sgs.client.simple.SimpleClientListener;
+import com.sun.sgs.impl.sharedutil.LoggerWrapper;
 
 public class Client implements SimpleClientListener {
 
+    private static final LoggerWrapper logger =
+            new LoggerWrapper(Logger.getLogger(Client.class.getName()));
+	
     public final SimpleClient _simpleClient = new SimpleClient(this); 
     public static void main(String[] args) {
             // TODO Auto-generated method stub
             final Client client = new Client();
+
+            logger.log(Level.INFO,"aa");
             
+            
+
             final Properties properties = new Properties( System.getProperties() );
             
             properties.setProperty("port","62964");
